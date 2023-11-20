@@ -11,19 +11,19 @@
  *   APP_READY,
  *   subscribe,
  * } from '@edx/frontend-platform';
- * import { AppProvider, ErrorPage, PageRoute } from '@edx/frontend-platform/react';
+ * import { AppProvider, ErrorPage, PageWrap } from '@edx/frontend-platform/react';
  * import React from 'react';
  * import ReactDOM from 'react-dom';
- * import { Switch } from 'react-router-dom';
+ * import { Routes, Route } from 'react-router-dom';
  *
  * subscribe(APP_READY, () => {
  *   ReactDOM.render(
  *     <AppProvider store={configureStore()}>
  *       <Header />
  *       <main>
- *         <Switch>
- *           <PageRoute exact path="/" component={PaymentPage} />
- *         </Switch>
+ *         <Routes>
+ *           <Route path="/" element={<PageWrap><PaymentPage /></PageWrap>} />
+ *         </Routes>
  *       </main>
  *       <Footer />
  *     </AppProvider>,
@@ -46,6 +46,15 @@
  */
 
 import { createBrowserHistory, createMemoryHistory } from 'history';
+/*
+This 'env.config' package is a special 'magic' alias in our webpack configuration in frontend-build.
+It points at an `env.config.js` file in the root of an MFE's repository if it exists and falls back
+to an empty object `{}` if the file doesn't exist.  This acts like an 'optional' import, in a sense.
+Note that the env.config.js file in frontend-platform's root directory is NOT used by the actual
+initialization code, it's just there for the test suite and example application.
+*/
+import envConfig from 'env.config'; // eslint-disable-line import/no-unresolved
+import { getPath } from './utils';
 import {
   publish,
 } from './pubSub';
@@ -90,8 +99,20 @@ import configureCache from './auth/LocalForageCache';
  */
 export const history = (typeof window !== 'undefined')
   ? createBrowserHistory({
-    basename: getConfig().PUBLIC_PATH,
+    basename: getPath(getConfig().PUBLIC_PATH),
   }) : createMemoryHistory();
+
+/**
+ * The string basename that is the root directory of this MFE.
+ *
+ * In devstack, this should always just return "/", because each MFE is in its own server/domain.
+ *
+ * In Tutor, all MFEs are deployed to a common server, each under a different top-level directory.
+ * The basename is the root path for a given MFE, e.g. "/library-authoring". It is set by tutor-mfe
+ * as an ENV variable in the Docker file, and we read it here from that configuration so that it
+ * can be passed into a Router later.
+ */
+export const basename = getPath(getConfig().PUBLIC_PATH);
 
 /**
  * The default handler for the initialization lifecycle's `initError` phase.  Logs the error to the
@@ -131,13 +152,32 @@ export async function auth(requireUser, hydrateUser) {
     hydrateAuthenticatedUser();
   }
 }
+
+/**
+ * Set or overrides configuration via an env.config.js file in the consuming application.
+ * This env.config.js is loaded at runtime and must export one of two things:
+ *
+ * - An object which will be merged into the application config via `mergeConfig`.
+ * - A function which returns an object which will be merged into the application config via
+ * `mergeConfig`.  This function can return a promise.
+ */
+async function jsFileConfig() {
+  let config = {};
+  if (typeof envConfig === 'function') {
+    config = await envConfig();
+  } else {
+    config = envConfig;
+  }
+
+  mergeConfig(config);
+}
+
 /*
  * Set or overrides configuration through an API.
  * This method allows runtime configuration.
  * Set a basic configuration when an error happen and allow initError and display the ErrorPage.
  */
-
-export async function runtimeConfig() {
+async function runtimeConfig() {
   try {
     const { MFE_CONFIG_API_URL, APP_ID } = getConfig();
 
@@ -264,6 +304,7 @@ export async function initialize({
 
     // Configuration
     await handlers.config();
+    await jsFileConfig();
     await runtimeConfig();
     publish(APP_CONFIG_INITIALIZED);
 
@@ -271,31 +312,21 @@ export async function initialize({
       config: getConfig(),
     });
 
+    // This allows us to replace the implementations of the logging, analytics, and auth services
+    // based on keys in the ConfigDocument.  The JavaScript File Configuration method is the only
+    // one capable of supplying an alternate implementation since it can import other modules.
+    // If a service wasn't supplied we fall back to the default parameters on the initialize
+    // function signature.
+    const loggingServiceImpl = getConfig().loggingService || loggingService;
+    const analyticsServiceImpl = getConfig().analyticsService || analyticsService;
+    const authServiceImpl = getConfig().authService || authService;
+
     // Logging
-    configureLogging(loggingService, {
+    configureLogging(loggingServiceImpl, {
       config: getConfig(),
     });
     await handlers.logging();
     publish(APP_LOGGING_INITIALIZED);
-
-    // Authentication
-    configureAuth(authService, {
-      loggingService: getLoggingService(),
-      config: getConfig(),
-      middleware: authMiddleware,
-    });
-
-    await handlers.auth(requireUser, hydrateUser);
-    publish(APP_AUTH_INITIALIZED);
-
-    // Analytics
-    configureAnalytics(analyticsService, {
-      config: getConfig(),
-      loggingService: getLoggingService(),
-      httpClient: getAuthenticatedHttpClient(),
-    });
-    await handlers.analytics();
-    publish(APP_ANALYTICS_INITIALIZED);
 
     // Internationalization
     configureI18n({
@@ -305,6 +336,25 @@ export async function initialize({
     });
     await handlers.i18n();
     publish(APP_I18N_INITIALIZED);
+
+    // Authentication
+    configureAuth(authServiceImpl, {
+      loggingService: getLoggingService(),
+      config: getConfig(),
+      middleware: authMiddleware,
+    });
+
+    await handlers.auth(requireUser, hydrateUser);
+    publish(APP_AUTH_INITIALIZED);
+
+    // Analytics
+    configureAnalytics(analyticsServiceImpl, {
+      config: getConfig(),
+      loggingService: getLoggingService(),
+      httpClient: getAuthenticatedHttpClient(),
+    });
+    await handlers.analytics();
+    publish(APP_ANALYTICS_INITIALIZED);
 
     // Application Ready
     await handlers.ready();
