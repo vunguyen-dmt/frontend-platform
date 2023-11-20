@@ -1,7 +1,0 @@
-.DS_Store
-.idea
-.vscode
-coverage
-node_modules
-/docs/api
-.env.private
